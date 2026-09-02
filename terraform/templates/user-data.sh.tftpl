@@ -1,0 +1,166 @@
+# Lightsail prepends its own `#!/bin/sh` bootstrap script to user data and runs
+# the result as one shell script, so this is POSIX sh appended to that script —
+# a #cloud-config document here would just be executed as shell and fail.
+set -x
+
+cat >/etc/sysctl.d/99-passw2.conf <<'SYSCTL'
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_fastopen = 3
+# 16 MB socket buffers: TCP needs them for BBR on long paths, QUIC (Hysteria2)
+# needs them or quic-go logs "UDP receive buffer size" warnings and drops packets.
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_slow_start_after_idle = 0
+SYSCTL
+sysctl --system
+
+# 512 MB of RAM on nano_3_0; a swapfile keeps apt and xray from being OOM-killed.
+if [ ! -f /swapfile ]; then
+  fallocate -l 1G /swapfile
+  chmod 600 /swapfile
+  mkswap /swapfile
+  swapon /swapfile
+  echo '/swapfile none swap sw 0 0' >>/etc/fstab
+fi
+
+export DEBIAN_FRONTEND=noninteractive
+for i in 1 2 3 4 5; do
+  apt-get update -y && apt-get install -y curl unzip ca-certificates && break
+  sleep 10
+done
+
+for i in 1 2 3 4 5; do
+  curl -fsSL https://github.com/XTLS/Xray-install/raw/main/install-release.sh \
+    -o /tmp/xray-install.sh && break
+  sleep 10
+done
+bash /tmp/xray-install.sh install
+
+# Written after the installer so it cannot lose to the packaged sample config.
+cat >/usr/local/etc/xray/config.json <<'XRAYCONF'
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [
+    {
+      "tag": "vless-reality",
+      "listen": "0.0.0.0",
+      "port": ${proxy_port},
+      "protocol": "vless",
+      "settings": {
+        "clients": ${jsonencode(xray_clients)},
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "${reality_dest}",
+          "xver": 0,
+          "serverNames": ${jsonencode(server_names)},
+          "privateKey": "${reality_private_key}",
+          "shortIds": ["${reality_short_id}"]
+        }
+      },
+      "sniffing": {
+        "enabled": true,
+        "destOverride": ["http", "tls", "quic"],
+        "routeOnly": true
+      }
+    }
+  ],
+  "outbounds": [
+    { "tag": "direct", "protocol": "freedom", "settings": { "domainStrategy": "UseIPv4v6" } },
+    { "tag": "block", "protocol": "blackhole" }
+  ],
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      { "type": "field", "ip": ["geoip:private"], "outboundTag": "block" },
+      { "type": "field", "protocol": ["bittorrent"], "outboundTag": "block" }
+    ]
+  }
+}
+XRAYCONF
+chmod 644 /usr/local/etc/xray/config.json
+
+# Hysteria2 (QUIC over UDP) as the second inbound. Installs /usr/local/bin/hysteria
+# and the hysteria-server.service unit reading /etc/hysteria/config.yaml.
+for i in 1 2 3 4 5; do
+  curl -fsSL https://get.hy2.sh/ -o /tmp/hy2-install.sh && break
+  sleep 10
+done
+bash /tmp/hy2-install.sh
+
+mkdir -p /etc/hysteria
+cat >/etc/hysteria/server.crt <<'CRT'
+${hysteria_cert_pem}CRT
+cat >/etc/hysteria/server.key <<'KEY'
+${hysteria_key_pem}KEY
+
+cat >/etc/hysteria/config.yaml <<'HYCONF'
+listen: ":${hysteria_port}"
+
+tls:
+  cert: /etc/hysteria/server.crt
+  key: /etc/hysteria/server.key
+
+auth:
+  type: userpass
+  userpass:
+%{ for name, password in hysteria_users ~}
+    ${name}: "${password}"
+%{ endfor ~}
+
+# Unauthenticated HTTP/3 clients get a reverse proxy of the impersonated site,
+# so probing the UDP port looks like a normal website.
+masquerade:
+  type: proxy
+  proxy:
+    url: ${hysteria_masquerade}
+    rewriteHost: true
+
+quic:
+  initStreamReceiveWindow: 8388608
+  maxStreamReceiveWindow: 8388608
+  initConnReceiveWindow: 20971520
+  maxConnReceiveWindow: 20971520
+
+# Let clients pick their own up/down bandwidth (Brutal); with 0 the server
+# falls back to BBR for that client.
+ignoreClientBandwidth: false
+
+acl:
+  inline:
+    - reject(10.0.0.0/8)
+    - reject(172.16.0.0/12)
+    - reject(192.168.0.0/16)
+    - reject(169.254.0.0/16)
+    - reject(127.0.0.0/8)
+    - reject(fc00::/7)
+    - reject(fe80::/10)
+HYCONF
+chmod 600 /etc/hysteria/server.key /etc/hysteria/config.yaml
+chown -R hysteria:hysteria /etc/hysteria
+
+cat >/root/passw2-node-info.txt <<'INFO'
+# Non-secret parameters of this node, for debugging.
+# Client share links are printed by scripts/links.sh on your workstation.
+vless_port    = ${proxy_port}/tcp
+hysteria_port = ${hysteria_port}/udp
+sni           = ${reality_server_name}
+dest          = ${reality_dest}
+shortId       = ${reality_short_id}
+flow          = xtls-rprx-vision
+users         = ${join(",", keys(hysteria_users))}
+INFO
+chmod 600 /root/passw2-node-info.txt
+
+systemctl enable xray hysteria-server
+systemctl restart xray hysteria-server
+systemctl is-active xray hysteria-server && touch /var/lib/passw2-ready
