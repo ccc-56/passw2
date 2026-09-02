@@ -1,0 +1,20 @@
+// cp terraform.tfvars.example terraform.tfvars and edit as needed.
+// Everything here already has a working default; overriding is optional.
+
+// One name per device. Each gets its own VLESS UUID and Hysteria2 password;
+// remove a name to revoke that device, add one to issue new credentials.
+// users = ["phone", "laptop", "tablet"]
+
+// Lock SSH down to your current address instead of the whole internet.
+// ssh_allowed_cidrs = ["203.0.113.7/32"]
+
+// Bigger bundle = more bundled egress (micro_3_0: 2 TB / $7, small_3_0: 3 TB / $12).
+// bundle_id = "micro_3_0"
+
+// Move Hysteria2 off 443/udp if your ISP throttles QUIC on that port.
+// hysteria_port = 8443
+
+// Site the node impersonates. Pick one that is reachable from Seoul, serves
+// TLS 1.3 + HTTP/2, and is not already blocked in China.
+// reality_dest         = "www.apple.com:443"
+// reality_server_names = ["www.apple.com"]
